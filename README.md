@@ -97,11 +97,17 @@ Enforces fintech-grade security over `customer_reply` and `recommended_next_acti
 
 ## MODELS Section
 
-| Model / Engine | Runtime Location | Role | Selection Rationale |
-|---|---|---|---|
-| **Deterministic Rule Engine** | In-Process (CPU only) | Computes all decision fields, applies safety sanitization, and generates bilingual response templates. | 100% deterministic, instant execution (~0ms), zero cost, and failsafe. |
+| Model / Engine | Provider | Runtime Location | Role | Selection Rationale |
+|---|---|---|---|---|
+| **Deterministic Rule Engine** | In-house | In-Process (CPU only) | Computes all scored decision fields (`case_type`, `evidence_verdict`, `severity`, `department`, etc.) and applies safety sanitization. | 100% deterministic, instant execution (~0ms), zero cost, and failsafe. It is the source of truth and is never overridden by the LLM. |
+| **Primary Model** — `deepseek/deepseek-v4-flash` | [OpenRouter](https://openrouter.ai) | OpenRouter API | Drafts the three free-text fields (`agent_summary`, `recommended_next_action`, `customer_reply`) in natural, language-matched prose, using the rule engine's verdict as ground truth. | Strong multilingual (English/Bangla) instruction-following at very low latency and cost, with reliable JSON-mode output for schema-safe drafting. |
+| **Fallback Model** — `mistralai/mistral-small-2603` | [OpenRouter](https://openrouter.ai) | OpenRouter API | Transparent backup for the primary model. Drafts the same three fields when the primary is unavailable. | Independent provider with comparable multilingual quality, used to remove single-model dependency. |
 
-*   **Rule-Based Solver**: Following the Online Preliminary instruction manual's policy allowing rule-based logic, the system runs entirely locally on the rule engine without external LLM API calls. This guarantees 100% schema validation, absolute consistency, and stays immune to network timeouts or external rate limits.
+### Why a primary + fallback chain?
+*   **Resilience**: The two models come from different providers via OpenRouter. If the primary is rate-limited, returns a `5xx`, times out, or produces unusable output, the system transparently retries with the fallback (`app/llm.py` → `model_chain()` in `app/config.py`).
+*   **Bounded latency**: Both attempts share a single time budget kept safely under the grader's 30-second limit, so a slow primary still leaves room for the fallback.
+*   **Always-safe degradation**: The LLM only ever rewrites the three free-text fields and is explicitly defended against prompt injection. If **both** models fail, the service falls back to the deterministic bilingual templates — so a valid `200` response is guaranteed regardless of LLM availability.
+*   **Configuration**: Both slugs are environment-driven (`MODEL_NAME`, `FALLBACK_MODEL_NAME`) and read via OpenRouter (`OPENROUTER_BASE_URL`). Setting `FALLBACK_MODEL_NAME` empty disables the fallback; an unset `OPENROUTER_API_KEY` disables the LLM layer entirely and runs rules-only.
 
 ---
 
@@ -187,5 +193,5 @@ To run or verify the project locally:
 ## Competition Verification & Confirmations
 
 *   **[x] No Real Customer Data**: We confirm that all data used, stored, or processed is 100% synthetic. No real customer or payment data has been committed or transmitted.
-*   **[x] No Secrets Committed**: The application runs entirely on the local deterministic rule engine without requiring any third-party API keys (e.g. OpenRouter, OpenAI, or Gemini), ensuring no secrets or tokens exist or are committed to the repository.
+*   **[x] No Secrets Committed**: The OpenRouter API key is supplied at runtime via environment variables only. The `.env` file is git-ignored (see `.gitignore`) and only `.env.example` with placeholders is committed, so no secrets or tokens exist in the repository. The service also degrades to the deterministic rule engine if the key is absent.
 *   **[x] Repository Access**: Technical judges have read access via organizer handles.
