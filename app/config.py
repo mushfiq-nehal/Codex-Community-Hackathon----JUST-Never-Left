@@ -11,6 +11,11 @@ import os
 
 OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "").strip()
 MODEL_NAME: str = os.getenv("MODEL_NAME", "google/gemini-2.0-flash-001").strip()
+# Secondary model used only when the primary model is unavailable (rate limited,
+# provider 5xx, or timeout). Set to empty to disable the fallback.
+FALLBACK_MODEL_NAME: str = os.getenv(
+    "FALLBACK_MODEL_NAME", "mistralai/mistral-small-2603"
+).strip()
 OPENROUTER_BASE_URL: str = os.getenv(
     "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
 ).strip()
@@ -19,6 +24,29 @@ try:
     LLM_TIMEOUT_SECONDS: float = float(os.getenv("LLM_TIMEOUT_SECONDS", "12"))
 except ValueError:
     LLM_TIMEOUT_SECONDS = 12.0
+
+# Overall budget shared across the primary + fallback attempts. Kept safely under
+# the 30s grader limit so a slow primary can still leave room for the fallback.
+try:
+    LLM_TOTAL_TIMEOUT_SECONDS: float = float(
+        os.getenv("LLM_TOTAL_TIMEOUT_SECONDS", str(2 * LLM_TIMEOUT_SECONDS + 1.0))
+    )
+except ValueError:
+    LLM_TOTAL_TIMEOUT_SECONDS = 2 * LLM_TIMEOUT_SECONDS + 1.0
+
+
+def model_chain() -> tuple[str, ...]:
+    """Ordered list of models to try: primary first, then the fallback.
+
+    De-duplicates and drops empties so configuration mistakes (e.g. fallback ==
+    primary, or an unset fallback) never cause a redundant or empty attempt.
+    """
+    chain = []
+    for name in (MODEL_NAME, FALLBACK_MODEL_NAME):
+        name = (name or "").strip()
+        if name and name not in chain:
+            chain.append(name)
+    return tuple(chain)
 
 # Truncate very long complaints before sending to the LLM to keep latency and
 # token cost bounded. The deterministic engine still sees the full text.
