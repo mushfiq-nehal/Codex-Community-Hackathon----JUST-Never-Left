@@ -21,12 +21,13 @@ import httpx
 
 from .config import (
     LLM_TIMEOUT_SECONDS,
+    LLM_TOTAL_TIMEOUT_SECONDS,
     MAX_COMPLAINT_CHARS_FOR_LLM,
     MAX_TRANSACTIONS_FOR_LLM,
-    MODEL_NAME,
     OPENROUTER_API_KEY,
     OPENROUTER_BASE_URL,
     llm_enabled,
+    model_chain,
 )
 from .reasoning import Decision
 from .schemas import AnalyzeRequest
@@ -121,14 +122,14 @@ def _extract_json(content: str) -> Optional[dict]:
     return data
 
 
-async def _call_openrouter(payload: str) -> Optional[str]:
+async def _call_openrouter(payload: str, model: str) -> Optional[str]:
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
         "X-Title": "QueueStorm Investigator",
     }
     body = {
-        "model": MODEL_NAME,
+        "model": model,
         "messages": [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": payload},
@@ -145,27 +146,51 @@ async def _call_openrouter(payload: str) -> Optional[str]:
         return data["choices"][0]["message"]["content"]
 
 
-async def draft_response(req: AnalyzeRequest, decision: Decision) -> Optional[dict]:
-    """Return {agent_summary, recommended_next_action, customer_reply} or None."""
-    if not llm_enabled():
-        return None
-
-    payload = _build_user_payload(req, decision)
-    try:
-        content = await asyncio.wait_for(
-            _call_openrouter(payload), timeout=LLM_TIMEOUT_SECONDS + 1.0
-        )
-    except (asyncio.TimeoutError, httpx.HTTPError, KeyError, IndexError, Exception):  # noqa: BLE001
-        logger.warning("LLM drafting unavailable; falling back to templates")
-        return None
-
+def _parse_draft(content: Optional[str]) -> Optional[dict]:
     data = _extract_json(content or "")
     if not data:
         return None
-
     result = {}
     for key in ("agent_summary", "recommended_next_action", "customer_reply"):
         value = data.get(key)
         if isinstance(value, str) and value.strip():
             result[key] = value.strip()
     return result or None
+
+
+async def draft_response(req: AnalyzeRequest, decision: Decision) -> Optional[dict]:
+    """Return {agent_summary, recommended_next_action, customer_reply} or None.
+
+    Tries the primary model first and, if it is unavailable (rate limited,
+    provider 5xx, timeout, or unusable output), transparently falls back to the
+    secondary model. All attempts share a single time budget that stays safely
+    under the grader's 30s limit; if everything fails we return ``None`` so the
+    caller uses the deterministic templates.
+    """
+    if not llm_enabled():
+        return None
+
+    payload = _build_user_payload(req, decision)
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + LLM_TOTAL_TIMEOUT_SECONDS
+
+    for model in model_chain():
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            break
+        per_attempt = min(LLM_TIMEOUT_SECONDS + 1.0, remaining)
+        try:
+            content = await asyncio.wait_for(
+                _call_openrouter(payload, model), timeout=per_attempt
+            )
+        except (asyncio.TimeoutError, httpx.HTTPError, KeyError, IndexError, Exception):  # noqa: BLE001
+            logger.warning("LLM model '%s' unavailable; trying fallback", model)
+            continue
+
+        result = _parse_draft(content)
+        if result:
+            return result
+        logger.warning("LLM model '%s' returned unusable output; trying fallback", model)
+
+    logger.warning("All LLM models unavailable; falling back to templates")
+    return None
