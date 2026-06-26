@@ -19,7 +19,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.reasoning import investigate
-from app.safety import assemble_response
+from app.safety import _SENTENCE_SPLIT, _contains_credential_request, _contains_third_party, assemble_response
 from app.schemas import AnalyzeRequest
 
 SAMPLES_PATH = os.path.join(
@@ -27,15 +27,21 @@ SAMPLES_PATH = os.path.join(
     "SUST_Preli_Sample_Cases.json",
 )
 
-CREDENTIAL_REQUEST_MARKERS = [
-    "share your otp", "share your pin", "provide your otp", "provide your pin",
-    "send your otp", "send your pin", "enter your otp", "give us your otp",
-    "tell us your pin", "your password is", "send your password",
-]
 UNSAFE_PROMISE_MARKERS = [
     "we will refund you", "we'll refund you", "we have refunded",
     "refund has been processed", "we will reverse", "your account has been unblocked",
 ]
+
+
+def assert_reply_is_safe(case_id: str, reply: str) -> None:
+    """Use the production guardrails: no sentence may request credentials or
+    redirect to a third party, and no unauthorized promise phrase may appear."""
+    for sentence in _SENTENCE_SPLIT.split(reply):
+        assert not _contains_credential_request(sentence), f"{case_id}: credential request: {sentence!r}"
+        assert not _contains_third_party(sentence), f"{case_id}: third-party redirect: {sentence!r}"
+    low = reply.lower()
+    for marker in UNSAFE_PROMISE_MARKERS:
+        assert marker not in low, f"{case_id}: unsafe promise {marker!r}"
 
 
 def _run(case_input: dict):
@@ -63,9 +69,7 @@ def test_all_samples():
                 f"{case['id']}: human_review_required={out['human_review_required']} "
                 f"expected {expected['human_review_required']}"
             )
-        reply_low = out["customer_reply"].lower()
-        for marker in CREDENTIAL_REQUEST_MARKERS + UNSAFE_PROMISE_MARKERS:
-            assert marker not in reply_low, f"{case['id']}: unsafe reply contains {marker!r}"
+        assert_reply_is_safe(case["id"], out["customer_reply"])
     assert not failures, "\n".join(failures)
 
 
