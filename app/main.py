@@ -29,6 +29,12 @@ app = FastAPI(
 )
 
 
+@app.get("/")
+async def root():
+    """Root endpoint to provide a meaningful welcome message."""
+    return {"message": "Welcome to QueueStorm Investigator API. Please use /health for liveness checks or /analyze-ticket to process support tickets or /docs for API documentation."}
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     """Liveness/readiness probe. Must return {"status":"ok"} quickly."""
